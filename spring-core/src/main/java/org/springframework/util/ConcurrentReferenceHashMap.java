@@ -12,6 +12,13 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
+ * 一个{@link ConcurrentHashMap}，它对{@code key}和{@code value}使用{@link ReferenceType#SOFT}软引用或{@linkplain ReferenceType#WEAK}弱引用。
+ *
+ * 此类可以用作{@code Collections.synchronizedMap(new WeakHashMap<K,Reference<V>>())}的替代方法，以便在并发访问时提供更好的性能。
+ * 此实现遵循与{@link ConcurrentHashMap}相同的设计约束，但支持{@code null}值和{@code null}键。
+ *
+ * 使用引用意味着不能保证放置在Map中的项目随后将可用。 垃圾收集器可能会随时丢弃引用，因此似乎未知线程正在静默删除条目。
+ *
  * @author shuai.yang
  */
 public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> {
