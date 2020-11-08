@@ -69,6 +69,9 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
      * */
     private final int shift;
 
+    @Nullable
+    private volatile Set<Map.Entry<K, V>> entrySet;
+
     /**
      * 创建一个新的实例, 传入默认值
      * */
@@ -289,6 +292,129 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
                 return null;
             }
         });
+    }
+
+    @Override
+    @Nullable
+    public V remove(Object key) {
+        return doTask(key, new Task<V>(TaskOption.RESTRUCTURE_AFTER, TaskOption.SKIP_IF_EMPTY) {
+            @Override
+            @Nullable
+            protected V execute(@Nullable Reference<K, V> ref, @Nullable Entry<K, V> entry) {
+                if (entry != null) {
+                    if (ref != null) {
+                        ref.release();
+                    }
+                    return entry.value;
+                }
+                return null;
+            }
+        });
+    }
+
+    @Override
+    public boolean remove(Object key, final Object value) {
+        Boolean result = doTask(key, new Task<Boolean>() {
+            @Override
+            protected Boolean execute(@Nullable Reference<K, V> ref, @Nullable Entry<K, V> entry) {
+                if (entry != null && ObjectUtils.nullSafeEquals(entry.getValue(), value)) {
+                    if (ref != null) {
+                        ref.release();
+                    }
+                    return true;
+                }
+                return false;
+            }
+        });
+        return (result == Boolean.TRUE);
+    }
+
+    @Override
+    public boolean replace(K key, final V oldValue, final V newValue) {
+        Boolean result = doTask(key, new Task<Boolean>() {
+            @Override
+            protected Boolean execute(Reference<K, V> ref, Entry<K, V> entry) {
+                if (entry != null && ObjectUtils.nullSafeEquals(entry.getValue(), oldValue)) {
+                    entry.setValue(newValue);
+                    return true;
+                }
+                return false;
+            }
+        });
+        return (result == Boolean.TRUE);
+    }
+
+    @Override
+    @Nullable
+    public V replace(K key, final V value) {
+        return doTask(key, new Task<V>() {
+            @Override
+            @Nullable
+            protected V execute(@Nullable Reference<K, V> ref, @Nullable Entry<K, V> entry) {
+                if (entry != null) {
+                    V oldValue = entry.getValue();
+                    entry.setValue(value);
+                    return oldValue;
+                }
+                return null;
+            }
+        });
+    }
+
+    /**
+     * 清空Map。循环调用段对象的clear方法清空各个段
+     * */
+    @Override
+    public void clear() {
+        for (Segment segment : segments) {
+            segment.clear();
+        }
+    }
+
+    /**
+     * 删除所有已被垃圾回收且不再被引用的条目。
+     * 在正常情况下，随着在Map中添加或删除项目，垃圾收集条目将自动清除。
+     * 此方法可用于强制清除，当频繁读取Map但更新频率较低时，此方法很有用。
+     * */
+    public void purgeUnreferencedEntries() {
+        for (Segment segment : segments) {
+            segment.restructureIfNecessary(false);
+        }
+    }
+
+    /**
+     * 获取Map中元素个数。循环统计每个段的总数， 累加
+     * */
+    @Override
+    public int size() {
+        int size = 0;
+        for (Segment segment : segments) {
+            size += segment.getCount();
+        }
+        return size;
+    }
+
+    /**
+     * 判断Map是否为空， 循环判断每个段，如果其中一个段有数据，则返回false。非空
+     * */
+    @Override
+    public boolean isEmpty() {
+        for (Segment segment : segments) {
+            if (segment.getCount() > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public Set<Map.Entry<K, V>> entrySet() {
+        Set<Map.Entry<K, V>> entrySet = this.entrySet;
+        if (entrySet == null) {
+            entrySet = new EntrySet();
+            this.entrySet = entrySet;
+        }
+        return entrySet;
     }
 
     @Nullable
@@ -523,6 +649,7 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
          * 在链表中查找指定节点
          * 先比较节点hash值, 再取出节点内的key值进行比较
          * */
+        @Nullable
         private Reference<K, V> findInChain(Reference<K, V> reference, @Nullable Object key, int hash) {
             Reference<K, V> currRef = reference;
             // 循环链表
@@ -597,12 +724,12 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
          * 返回链中的下一个引用；如果没有，则返回null
          * @return  链表中下一个引用
          */
+        @Nullable
         Reference<K, V> getNext();
 
         /**
          * 释放此条目，并确保它将从{@code ReferenceManager#pollForPurge()}返回。
          */
-        @Nullable
         void release();
     }
 
@@ -760,7 +887,11 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
 
         @Override
         public boolean remove(Object o) {
-
+            if (o instanceof Map.Entry<?, ?>) {
+                Map.Entry<?, ?> entry = (Map.Entry<?, ?>) o;
+                return ConcurrentReferenceHashMap.this.remove(entry.getKey(), entry.getValue());
+            }
+            return false;
         }
 
         @Override
