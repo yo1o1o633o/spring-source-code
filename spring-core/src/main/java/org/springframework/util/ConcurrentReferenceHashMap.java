@@ -19,6 +19,11 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * 使用引用意味着不能保证放置在Map中的项目随后将可用。 垃圾收集器可能会随时丢弃引用，因此似乎未知线程正在静默删除条目。
  *
+ * 此Map采用分段形式进行数据存储，首先根据Map的默认操作线程数计算出需要分成多少个段进行数据存储， 即多少个Segment
+ * 数据存储采用软引用或弱引用中的一种形式进行保存，即是用Reference的子类进行包装数据
+ * 数据保存成K-V形式保存于Entry中， 将Entry放入到Reference的相应子类中
+ *
+ *
  * @author shuai.yang
  */
 public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> {
@@ -609,10 +614,12 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
                     int restructureSize = this.references.length;
                     // 判断是否重新计算
                     if (allowResize && needsResize && restructureSize < MAXIMUM_SEGMENT_SIZE) {
+                        // 扩容,当前容量翻倍
                         restructureSize <<= 1;
+                        // 标记需要进行扩容的后续操作
                         resizing = true;
                     }
-                    // 创建一个新表或重用现有表. 如果上述判断需要重新计算, 那么创建一个新表
+                    // 拿到扩容标记, 如果为true, 需要重新创建一个新表容量为扩容后的容量. 如果标记为负,则不需扩容使用原表
                     Reference<K, V>[] restructured = resizing ? createReferenceArray(restructureSize) : this.references;
 
                     // 重组
