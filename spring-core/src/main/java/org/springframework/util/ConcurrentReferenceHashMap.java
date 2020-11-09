@@ -189,6 +189,9 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
     /**
      * 获取给定对象的哈希，应用附加的哈希函数以减少冲突。
      * 此实现使用与{@link ConcurrentHashMap}相同的Wang/Jenkins算法。
+     * Wang/Jenkins算法
+     * 1.雪崩性（更改输入参数的任何一位，就将引起输出有一半以上的位发生变化）
+     * 2.可逆性（input ==> hash ==> inverse_hash ==> input）
      * 子类可以重写以提供替代的哈希。
      * */
     protected int getHash(@Nullable Object o) {
@@ -272,6 +275,18 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
 
     /**
      * 给Map的指定Key设置新值, 返回旧值
+     *
+     * 创建一个任务, 此任务中执行以下操作:
+     * 1. 创建一个数据执行任务, 用于执行赋值和添加操作
+     * 2. 根据key计算hash值, 获取对应的段Segment
+     * 3. 调用段内doTask数据处理任务
+     * 4. 先判断是否需要进行数据重组, 如需要则进行重组
+     * 5. 根据hash值找到对应的引用节点Reference
+     * 6. 取出Reference内数据实体Entry
+     * 7. 执行第一步创建的数据执行任务, 并传入数据更新对象Entries
+     * 8. 如果Entry查询到, 那么判断是否需要覆盖原值. 并返回旧值
+     * 9. 如果Entry不存在, 则进行添加操作, 调用Entries对象add方法将数据添加到Map中
+     *
      * @param key                键
      * @param value              新值
      * @param overwriteExisting  是否覆盖现有值
@@ -319,7 +334,7 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
 
     @Override
     public boolean remove(Object key, final Object value) {
-        Boolean result = doTask(key, new Task<Boolean>() {
+        Boolean result = doTask(key, new Task<Boolean>(TaskOption.RESTRUCTURE_AFTER, TaskOption.SKIP_IF_EMPTY) {
             @Override
             protected Boolean execute(@Nullable Reference<K, V> ref, @Nullable Entry<K, V> entry) {
                 if (entry != null && ObjectUtils.nullSafeEquals(entry.getValue(), value)) {
@@ -336,7 +351,7 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
 
     @Override
     public boolean replace(K key, final V oldValue, final V newValue) {
-        Boolean result = doTask(key, new Task<Boolean>() {
+        Boolean result = doTask(key, new Task<Boolean>(TaskOption.RESTRUCTURE_BEFORE, TaskOption.SKIP_IF_EMPTY) {
             @Override
             protected Boolean execute(Reference<K, V> ref, Entry<K, V> entry) {
                 if (entry != null && ObjectUtils.nullSafeEquals(entry.getValue(), oldValue)) {
@@ -352,7 +367,7 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
     @Override
     @Nullable
     public V replace(K key, final V value) {
-        return doTask(key, new Task<V>() {
+        return doTask(key, new Task<V>(TaskOption.RESTRUCTURE_BEFORE, TaskOption.SKIP_IF_EMPTY) {
             @Override
             @Nullable
             protected V execute(@Nullable Reference<K, V> ref, @Nullable Entry<K, V> entry) {
@@ -518,15 +533,19 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
             return findInChain(head, key, hash);
         }
 
+        /**
+         * put操作要在放入前进行数据重组
+         * remove和replace操作要在操作后进行数据重组,同时没有数据的时候跳过操作
+         * */
         @Nullable
         public <T> T doTask(final int hash, @Nullable final Object key, final Task<T> task) {
-            // 调用任务传参条件里是否有重新调整大小操作
+            // put操作传参, 需要进行数据重组判断, 判断是否需要扩容存储容量
             boolean resize = task.hasOption(TaskOption.RESIZE);
-            // 调用任务传参条件里是否有前置操作, 判断是否需要重组数据
+            // put,replace操作传参, 在对当前段数据进行操作前进行重组判断, 判断是否需要扩容存储容量
             if (task.hasOption(TaskOption.RESTRUCTURE_BEFORE)) {
                 restructureIfNecessary(resize);
             }
-            // 调用任务传参条件里是否有为空跳过, 同时没有数据
+            // remove操作的传参, 如果当前段没有元素则执行空操作
             if (task.hasOption(TaskOption.SKIP_IF_EMPTY) && this.count == 0) {
                 // 执行空操作, 返回
                 return task.execute(null, null, null);
@@ -541,6 +560,12 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
                 Reference<K, V> reference = findInChain(head, key, hash);
                 Entry<K, V> entry = (reference != null ? reference.get() : null);
                 Entries entries = new Entries() {
+                    /**
+                     * Entry用于保存数据
+                     * Reference用于将Entry数据封装成引用对象
+                     * this.references数据保存引用对象
+                     * count记录当前段的元素个数
+                     * */
                     @Override
                     public void add(@Nullable V value) {
                         @SuppressWarnings("unchecked")
@@ -589,9 +614,11 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
          * 该方法可以增加引用表的大小，并清除所有垃圾回收的引用
          * */
         protected final void restructureIfNecessary(boolean allowResize) {
+            // 当前段有数据, 同时数据量超出阈值
             boolean needsResize = ((this.count > 0) && (this.count >= this.resizeThreshold));
-            // 取出队列节点
+            // 取出队列头节点
             Reference<K, V> reference = this.referenceManager.pollForPurge();
+            // 引用对象队列中有数据, 或者需要进行数据重组
             if ((reference != null) || (needsResize && allowResize)) {
                 lock();
                 try {
@@ -622,7 +649,7 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
                     // 拿到扩容标记, 如果为true, 需要重新创建一个新表容量为扩容后的容量. 如果标记为负,则不需扩容使用原表
                     Reference<K, V>[] restructured = resizing ? createReferenceArray(restructureSize) : this.references;
 
-                    // 重组
+                    // 重组. 为什么要循环取出来重新创建呢. 不能整体拷贝吗
                     for (int i = 0; i < this.references.length; i++) {
                         reference = this.references[i];
                         if (!resizing) {
@@ -640,9 +667,10 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
                         }
                     }
 
-                    // 替换volatile数据
+                    // 替换volatile数据, 如果重组了数据
                     if (resizing) {
                         this.references = restructured;
+                        // 重新计算新的阈值
                         this.resizeThreshold = (int) (this.references.length * getLoadFactor());
                     }
                     this.count = Math.max(countAfterRestructure, 0);
@@ -1098,6 +1126,12 @@ public class ConcurrentReferenceHashMap<K, V> extends AbstractMap<K, V> implemen
 
     /**
      * WeakReference 的内部实现
+     * 创建一个弱引用对象, 将Entry对象放进去
+     * 后进先出队列模型
+     *
+     * 1. 取出头节点
+     * 2. 设置Entry
+     * 3. 将原头节点赋值给新创建对象的next节点.
      * */
     private static final class WeakEntryReference<K, V> extends WeakReference<Entry<K, V>> implements Reference<K, V> {
 
